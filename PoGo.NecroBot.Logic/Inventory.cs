@@ -1,15 +1,7 @@
 #region using directives
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using PoGo.NecroBot.Logic.Common;
-using PoGo.NecroBot.Logic.Logging;
 using PoGo.NecroBot.Logic.PoGoUtils;
 using PoGo.NecroBot.Logic.State;
-using PokemonGo.RocketAPI;
 using POGOProtos.Data;
 using POGOProtos.Data.Player;
 using POGOProtos.Enums;
@@ -17,6 +9,12 @@ using POGOProtos.Inventory;
 using POGOProtos.Inventory.Item;
 using POGOProtos.Networking.Responses;
 using POGOProtos.Settings.Master;
+using PokemonGo.RocketAPI;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 #endregion
 
@@ -63,6 +61,16 @@ namespace PoGo.NecroBot.Logic
                 inventory.InventoryDelta.InventoryItems.Remove(pokemon);
         }
 
+        public async Task<LevelUpRewardsResponse> GetLevelUpRewards(Inventory inv )
+        {
+            var GetData = await _client.Player.GetPlayer(); 
+
+            var ClientLevel = await _client.Player.GetPlayerProfile( GetData.PlayerData.Username );
+            var Rewards = await _client.Player.GetLevelUpRewards( inv.GetPlayerStats().Result.FirstOrDefault().Level );
+
+            return Rewards;
+
+        }
         private async Task<GetInventoryResponse> GetCachedInventory()
         {
             var now = DateTime.UtcNow;
@@ -76,91 +84,87 @@ namespace PoGo.NecroBot.Logic
 
         public async Task<IEnumerable<PokemonData>> GetDuplicatePokemonToTransfer(
             bool keepPokemonsThatCanEvolve = false, bool prioritizeIVoverCp = false,
-            IEnumerable<PokemonId> filter = null)
+            IEnumerable<PokemonId> filter = null, IEnumerable<PokemonId> evolultionFilter = null)
         {
             var myPokemon = await GetPokemons();
 
-            var pokemonList = (_logicSettings.KeepMinOperator.ToLower().Equals("and")) ?
+            var pokemonFiltered = (_logicSettings.KeepMinOperator.ToLower().Equals("and")) ?
                 myPokemon.Where(
                     p => p.DeployedFortId == string.Empty &&
                             p.Favorite == 0 && (p.Cp < GetPokemonTransferFilter(p.PokemonId).KeepMinCp ||
-                                                PokemonInfo.CalculatePokemonPerfection(p) < GetPokemonTransferFilter(p.PokemonId).KeepMinIvPercentage)).ToList() :
+                                                PokemonInfo.CalculatePokemonPerfection(p) < GetPokemonTransferFilter(p.PokemonId).KeepMinIvPercentage)) :
                 myPokemon.Where(
                     p => p.DeployedFortId == string.Empty &&
                             p.Favorite == 0 && (p.Cp < GetPokemonTransferFilter(p.PokemonId).KeepMinCp &&
-                                                PokemonInfo.CalculatePokemonPerfection(p) < GetPokemonTransferFilter(p.PokemonId).KeepMinIvPercentage)).ToList();
+                                                PokemonInfo.CalculatePokemonPerfection(p) < GetPokemonTransferFilter(p.PokemonId).KeepMinIvPercentage));
 
             if (filter != null)
+                pokemonFiltered = pokemonFiltered.Where(p => !filter.Contains(p.PokemonId));
+
+            if (evolultionFilter != null && keepPokemonsThatCanEvolve)
+                pokemonFiltered = pokemonFiltered.Where(p => !evolultionFilter.Contains(p.PokemonId));
+
+            var pokemonList = pokemonFiltered.ToList();
+
+            var results = new List<PokemonData>();
+            var pokemonsThatCanBeTransfered = pokemonList.GroupBy(p => p.PokemonId).ToList();
+
+            var myPokemonSettings = await GetPokemonSettings();
+            var pokemonSettings = myPokemonSettings.ToList();
+
+            var myPokemonFamilies = await GetPokemonFamilies();
+            var pokemonFamilies = myPokemonFamilies.ToArray();
+
+            foreach (var pokemon in pokemonsThatCanBeTransfered)
             {
-                pokemonList = pokemonList.Where(p => !filter.Contains(p.PokemonId)).ToList();
-            }
-            if (keepPokemonsThatCanEvolve)
-            {
-                var results = new List<PokemonData>();
-                var pokemonsThatCanBeTransfered = pokemonList.GroupBy(p => p.PokemonId)
-                    .Where(x => x.Count() > GetPokemonTransferFilter(x.Key).KeepMinDuplicatePokemon).ToList();
+                var settings = pokemonSettings.Single(x => x.PokemonId == pokemon.Key);
+                var amountToSkip = GetPokemonTransferFilter(pokemon.Key).KeepMinDuplicatePokemon;
+                var familyCandy = pokemonFamilies.Single(x => settings.FamilyId == x.FamilyId);
 
-                var myPokemonSettings = await GetPokemonSettings();
-                var pokemonSettings = myPokemonSettings.ToList();
+                var transferrablePokemonTypeCount = pokemonFiltered.Where(p => p.PokemonId == pokemon.Key).Count();
+                var currentPokemonTypeCount = myPokemon.Where(p => p.PokemonId == pokemon.Key).Count();
+                var currentlyKeepingPokemonType = currentPokemonTypeCount - transferrablePokemonTypeCount;
 
-                var myPokemonFamilies = await GetPokemonFamilies();
-                var pokemonFamilies = myPokemonFamilies.ToArray();
-
-                foreach (var pokemon in pokemonsThatCanBeTransfered)
+                if (currentlyKeepingPokemonType > GetPokemonTransferFilter(pokemon.Key).KeepMinDuplicatePokemon)
                 {
-                    var settings = pokemonSettings.Single(x => x.PokemonId == pokemon.Key);
-                    var familyCandy = pokemonFamilies.Single(x => settings.FamilyId == x.FamilyId);
-                    var amountToSkip = GetPokemonTransferFilter(pokemon.Key).KeepMinDuplicatePokemon;
-
-                    if (settings.CandyToEvolve > 0 && _logicSettings.PokemonsToEvolve.Contains(pokemon.Key))
-                    {
-                        var amountPossible = (familyCandy.Candy_ - 1) / (settings.CandyToEvolve - 1);
-                        if (amountPossible > amountToSkip)
-                            amountToSkip = amountPossible;
-                    }
-
-                    if (prioritizeIVoverCp)
-                    {
-                        results.AddRange(pokemonList.Where(x => x.PokemonId == pokemon.Key)
-                            .OrderByDescending(PokemonInfo.CalculatePokemonPerfection)
-                            .ThenByDescending(n => n.Cp)
-                            .Skip(amountToSkip)
-                            .ToList());
-                    }
-                    else
-                    {
-                        results.AddRange(pokemonList.Where(x => x.PokemonId == pokemon.Key)
-                            .OrderByDescending(x => x.Cp)
-                            .ThenByDescending(PokemonInfo.CalculatePokemonPerfection)
-                            .Skip(amountToSkip)
-                            .ToList());
-                    }
+                    amountToSkip = 0;
+                }
+                else if (transferrablePokemonTypeCount > amountToSkip || currentlyKeepingPokemonType > 1)
+                {
+                    amountToSkip = (amountToSkip - currentlyKeepingPokemonType + 1);
                 }
 
-                return results;
+                // Fail safe
+                if (amountToSkip < 0) amountToSkip = 0;
+
+                // Check if we want to evolve this type of Pokemon before we transfer it
+                if (settings.EvolutionIds.Count != 0 && settings.CandyToEvolve > 0 && _logicSettings.PokemonsToEvolve.Contains(pokemon.Key))
+                {
+                    var amountPossible = (familyCandy.Candy_ - 1) / (settings.CandyToEvolve - 1);
+                    if (amountPossible > amountToSkip)
+                        amountToSkip = amountPossible+1;
+                }
+
+                if (prioritizeIVoverCp)
+                {
+                    results.AddRange(pokemonList.Where(x => x.PokemonId == pokemon.Key)
+                        .OrderByDescending(PokemonInfo.CalculatePokemonPerfection)
+                        .ThenByDescending(n => n.Cp)
+                        .Skip(amountToSkip)
+                        .ToList());
+                }
+                else
+                {
+                    results.AddRange(pokemonList.Where(x => x.PokemonId == pokemon.Key)
+                        .OrderByDescending(x => x.Cp)
+                        .ThenByDescending(PokemonInfo.CalculatePokemonPerfection)
+                        .Skip(amountToSkip)
+                        .ToList());
+                }
             }
-            if (prioritizeIVoverCp)
-            {
-                var skipnum = GetPokemonTransferFilter(PokemonId.Arbok).KeepMinDuplicatePokemon;
-                return pokemonList
-                    .GroupBy(p => p.PokemonId)
-                    .Where(x => x.Any())
-                    .SelectMany(
-                        p =>
-                            p.OrderByDescending(PokemonInfo.CalculatePokemonPerfection)
-                                .ThenBy(n => n.StaminaMax)
-                                .Skip(GetPokemonTransferFilter(p.Key).KeepMinDuplicatePokemon)
-                                .ToList());
-            }
-            return pokemonList
-                .GroupBy(p => p.PokemonId)
-                .Where(x => x.Any())
-                .SelectMany(
-                    p =>
-                        p.OrderByDescending(x => x.Cp)
-                            .ThenBy(n => n.StaminaMax)
-                            .Skip(GetPokemonTransferFilter(p.Key).KeepMinDuplicatePokemon)
-                            .ToList());
+
+            return results;
+            
         }
 
         public async Task<IEnumerable<EggIncubator>> GetEggIncubators()
@@ -246,10 +250,10 @@ namespace PoGo.NecroBot.Logic
 
         public async Task<IEnumerable<ItemData>> GetItemsToRecycle(ISession session)
         {
-            var itemsToRecylce = new List<ItemData>();
+            var itemsToRecycle = new List<ItemData>();
             var myItems = (await GetItems()).ToList();
 
-            var otherItemsToRecylce = myItems
+            var otherItemsToRecycle = myItems
                 .Where(x => _logicSettings.ItemRecycleFilter.Any(f => f.Key == x.ItemId && x.Count > f.Value))
                 .Select(
                     x =>
@@ -260,9 +264,9 @@ namespace PoGo.NecroBot.Logic
                             Unseen = x.Unseen
                         });
 
-            itemsToRecylce.AddRange(otherItemsToRecylce);
+            itemsToRecycle.AddRange(otherItemsToRecycle);
 
-            return itemsToRecylce;
+            return itemsToRecycle;
         }
 
         public double GetPerfect(PokemonData poke)
@@ -277,22 +281,6 @@ namespace PoGo.NecroBot.Logic
             return inventory.InventoryDelta.InventoryItems
                 .Select(i => i.InventoryItemData?.PlayerStats)
                 .Where(p => p != null);
-        }
-
-        private List<ItemData> GetPokeballsToRecycle(ISession session, IReadOnlyList<ItemData> myItems)
-        {
-            var amountOfPokeballsToKeep = _logicSettings.TotalAmountOfPokeballsToKeep;
-            if (amountOfPokeballsToKeep < 1)
-            {
-                Logger.Write(session.Translation.GetTranslation(TranslationString.PokeballsToKeepIncorrect),
-                    LogLevel.Error, ConsoleColor.Red);
-                return new List<ItemData>();
-            }
-
-            var allPokeballs = myItems.Where(s => _pokeballs.Contains(s.ItemId)).ToList();
-            allPokeballs.Sort((ball1, ball2) => ((int) ball1.ItemId).CompareTo((int) ball2.ItemId));
-
-            return TakeAmountOfItems(allPokeballs, amountOfPokeballsToKeep).ToList();
         }
 
         public async Task<UseItemXpBoostResponse> UseLuckyEggConstantly()
@@ -412,7 +400,7 @@ namespace PoGo.NecroBot.Logic
 
             var myPokemon = await GetPokemons();
             myPokemon = myPokemon.Where(p => p.DeployedFortId == string.Empty);
-
+            
             IEnumerable<PokemonData> highestPokemonForUpgrade = (_logicSettings.UpgradePokemonMinimumStatsOperator.ToLower().Equals("and")) ?
                 myPokemon.Where(
                         p => (p.Cp >= _logicSettings.UpgradePokemonCpMinimum &&
@@ -420,14 +408,11 @@ namespace PoGo.NecroBot.Logic
                 myPokemon.Where(
                     p => (p.Cp >= _logicSettings.UpgradePokemonCpMinimum ||
                         PokemonInfo.CalculatePokemonPerfection(p) >= _logicSettings.UpgradePokemonIvMinimum)).OrderByDescending(p => p.Cp).ToList();
-            /**
-             * @todo make sure theres enough candy (see line 109)
-             * @todo make sure max cp hasnt been reached
-             * @todo remove _logicSettings.AmountOfTimesToUpgradeLoop and use it as a count limitation in levelup loop for successes  instead
-             * */
+
             return upgradePokemon = (_logicSettings.LevelUpByCPorIv.ToLower().Equals("iv")) ?
-                    highestPokemonForUpgrade.OrderByDescending(PokemonInfo.CalculatePokemonPerfection).Take(_logicSettings.AmountOfTimesToUpgradeLoop).ToList() :
-                    highestPokemonForUpgrade.Take(_logicSettings.AmountOfTimesToUpgradeLoop).ToList();
+                    highestPokemonForUpgrade.Where(p => (p.Cp < PokemonInfo.CalculateMaxCp(p)))
+                        .OrderByDescending(PokemonInfo.CalculatePokemonPerfection).ToList() :
+                    highestPokemonForUpgrade.Where(p => (p.Cp < PokemonInfo.CalculateMaxCp(p))).ToList();
         }
 
         public TransferFilter GetPokemonTransferFilter(PokemonId pokemon)
@@ -438,39 +423,7 @@ namespace PoGo.NecroBot.Logic
                 return _logicSettings.PokemonsTransferFilter[pokemon];
             }
             return new TransferFilter(_logicSettings.KeepMinCp, _logicSettings.KeepMinIvPercentage,
-                _logicSettings.KeepMinDuplicatePokemon);
-        }
-
-        private List<ItemData> GetPotionsToRecycle(ISession session, IReadOnlyList<ItemData> myItems)
-        {
-            var amountOfPotionsToKeep = _logicSettings.TotalAmountOfPotionsToKeep;
-            if (amountOfPotionsToKeep < 1)
-            {
-                Logger.Write(session.Translation.GetTranslation(TranslationString.PotionsToKeepIncorrect),
-                    LogLevel.Error, ConsoleColor.Red);
-                return new List<ItemData>();
-            }
-
-            var allPotions = myItems.Where(s => _potions.Contains(s.ItemId)).ToList();
-            allPotions.Sort((i1, i2) => ((int) i1.ItemId).CompareTo((int) i2.ItemId));
-
-            return TakeAmountOfItems(allPotions, amountOfPotionsToKeep).ToList();
-        }
-
-        private List<ItemData> GetRevivesToRecycle(ISession session, IReadOnlyList<ItemData> myItems)
-        {
-            var amountOfRevivesToKeep = _logicSettings.TotalAmountOfRevivesToKeep;
-            if (amountOfRevivesToKeep < 1)
-            {
-                Logger.Write(session.Translation.GetTranslation(TranslationString.RevivesToKeepIncorrect),
-                    LogLevel.Error, ConsoleColor.Red);
-                return new List<ItemData>();
-            }
-
-            var allRevives = myItems.Where(s => _revives.Contains(s.ItemId)).ToList();
-            allRevives.Sort((i1, i2) => ((int) i1.ItemId).CompareTo((int) i2.ItemId));
-
-            return TakeAmountOfItems(allRevives, amountOfRevivesToKeep).ToList();
+                _logicSettings.KeepMinOperator, _logicSettings.KeepMinDuplicatePokemon);
         }
 
         public async Task<GetInventoryResponse> RefreshCachedInventory()
@@ -490,38 +443,6 @@ namespace PoGo.NecroBot.Logic
                 ss.Release();
             }
         }
-
-        private IEnumerable<ItemData> TakeAmountOfItems(IReadOnlyList<ItemData> items, int ammountToLeave)
-        {
-            var itemsAvailable = 0;
-            foreach (var item in items)
-            {
-                itemsAvailable += item.Count;
-            }
-
-            var itemsToRemove = itemsAvailable - ammountToLeave;
-
-            foreach (var item in items)
-            {
-                if (itemsToRemove > 0 && item.Count > 0)
-                {
-                    if (item.Count < itemsToRemove)
-                    {
-                        // Recylce all of this type
-                        itemsToRemove -= item.Count;
-                        yield return item;
-                    }
-                    else
-                    {
-                        // Recycle remaining amount
-                        var count = itemsToRemove;
-                        itemsToRemove = 0;
-                        yield return new ItemData {ItemId = item.ItemId, Count = count};
-                    }
-                }
-            }
-        }
-
 
         public async Task<UpgradePokemonResponse> UpgradePokemon(ulong pokemonid)
         {
