@@ -1,9 +1,8 @@
 ﻿#region using directives
 
-using System.Collections.Generic;
 using POGOProtos.Enums;
 using POGOProtos.Inventory.Item;
-using POGOProtos.Settings.Master.Item;
+using System.Collections.Generic;
 
 #endregion
 
@@ -47,12 +46,13 @@ namespace PoGo.NecroBot.Logic
         {
         }
 
-        public TransferFilter(int keepMinCp, float keepMinIvPercentage, int keepMinDuplicatePokemon, 
+        public TransferFilter(int keepMinCp, float keepMinIvPercentage, string keepMinOperator, int keepMinDuplicatePokemon, 
             List<PokemonMove> moves = null)
         {
             KeepMinCp = keepMinCp;
             KeepMinIvPercentage = keepMinIvPercentage;
             KeepMinDuplicatePokemon = keepMinDuplicatePokemon;
+            KeepMinOperator = keepMinOperator;
             Moves = moves ?? new List<PokemonMove>();
         }
 
@@ -60,10 +60,12 @@ namespace PoGo.NecroBot.Logic
         public float KeepMinIvPercentage { get; set; }
         public int KeepMinDuplicatePokemon { get; set; }
         public List<PokemonMove> Moves { get; set; }
+        public string KeepMinOperator { get; set; }
     }
 
     public interface ILogicSettings
     {
+        bool TransferWeakPokemon { get; }
         bool DisableHumanWalking { get; }
         bool AutoUpdate { get; }
         bool TransferConfigAndAuthOnUpdate { get; }
@@ -137,6 +139,7 @@ namespace PoGo.NecroBot.Logic
         int TotalAmountOfPokeballsToKeep { get; }
         int TotalAmountOfPotionsToKeep { get; }
         int TotalAmountOfRevivesToKeep { get; }
+        int TotalAmountOfBerriesToKeep { get; }
 
         bool ShowPokeballCountsBeforeRecycle { get; }
         bool VerboseRecycling { get; }
